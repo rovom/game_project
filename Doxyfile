@@ -1,0 +1,17 @@
+PROJECT_NAME           = "Pfinal"
+PROJECT_NUMBER         = "0.1"
+PROJECT_BRIEF          = "SDL platform game with main menu, save/load, character modes, minimap, puzzle challenge, and scores"
+OUTPUT_DIRECTORY       =
+OUTPUT_LANGUAGE        = English
+OPTIMIZE_OUTPUT_FOR_C  = YES
+INPUT                  = .
+FILE_PATTERNS          = *.c *.h
+RECURSIVE              = YES
+EXCLUDE                = html docs
+EXCLUDE_PATTERNS       = */html/* */docs/* */.git/*
+GENERATE_LATEX         = NO
+GENERATE_HTML          = YES
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = YES
+WARN_IF_UNDOCUMENTED   = NO
+HAVE_DOT               = NO
