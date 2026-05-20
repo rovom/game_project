@@ -1,3 +1,10 @@
+/**
+ * @file highscore.c
+ * @brief Implementation of the highscore system.
+ * @author Mariem Benmrad
+ * @version 0.1
+ * @date May 2026
+ */
 #include "highscore.h"
 #include <stdio.h>
 #include <string.h>
@@ -66,29 +73,68 @@ void safe_query_texture(SDL_Texture *tex, SDL_Rect *pos, int fw, int fh)
 void save_scores(Highscore *h)
 {
     FILE *f;
-    int   i;
 
-    f = fopen("scores.txt", "w");
+    f = fopen("scores.txt", "a");
     if (!f) return;
-    for (i = 0; i < 3; i++)
-        fprintf(f, "%s %d\n", h->names[i], h->scores[i]);
+    fprintf(f, "%s %d\n", h->playerName, h->playerScore);
     fclose(f);
 }
 
 void load_scores(Highscore *h)
 {
     FILE *f;
-    int   i;
+    char allNames[500][50];
+    int allScores[500];
+    char tempName[50];
+    int count;
+    int tempScore;
+    int i;
+    int j;
 
+    count = 0;
     f = fopen("scores.txt", "r");
-    if (!f) return;
-    for (i = 0; i < 3; i++) {
-        if (fscanf(f, "%49s %d", h->names[i], &h->scores[i]) != 2) {
-            h->names[i][0] = '\0';
-            h->scores[i]   = 0;
+    if (f)
+    {
+        while (count < 500 &&
+               fscanf(f, "%49s %d", allNames[count], &allScores[count]) == 2)
+            count++;
+        fclose(f);
+    }
+
+    for (i = 0; i < count - 1; i++)
+    {
+        for (j = 0; j < count - i - 1; j++)
+        {
+            if (allScores[j] < allScores[j + 1])
+            {
+                tempScore = allScores[j];
+                allScores[j] = allScores[j + 1];
+                allScores[j + 1] = tempScore;
+
+                strncpy(tempName, allNames[j], 49);
+                tempName[49] = '\0';
+                strncpy(allNames[j], allNames[j + 1], 49);
+                allNames[j][49] = '\0';
+                strncpy(allNames[j + 1], tempName, 49);
+                allNames[j + 1][49] = '\0';
+            }
         }
     }
-    fclose(f);
+
+    for (i = 0; i < 3; i++)
+    {
+        if (i < count)
+        {
+            h->scores[i] = allScores[i];
+            strncpy(h->names[i], allNames[i], 49);
+            h->names[i][49] = '\0';
+        }
+        else
+        {
+            h->names[i][0] = '\0';
+            h->scores[i] = 0;
+        }
+    }
 }
 
 void insert_score(Highscore *h, const char *name, int score)
@@ -164,8 +210,8 @@ void validate_entry(Highscore *h)
 {
     if (strlen(h->playerName) == 0)
         strncpy(h->playerName, "Player", 49);
-    insert_score(h, h->playerName, h->playerScore);
     save_scores(h);
+    load_scores(h);
     h->interface = 1;
     Mix_HaltMusic();
     if (h->victoryMusic)

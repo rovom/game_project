@@ -2,8 +2,8 @@ CC = gcc
 CFLAGS = -g -Wall -Wextra -Wpedantic
 LIBS = -lSDL2 -lSDL2_image -lSDL2_ttf -lSDL2_mixer
 
-prog: main.o source.o joueur.o character_select.o highscore.o minimap.o save_system.o main_menu.o puzzle_game/puzzle enigma/enigma
-	$(CC) main.o source.o joueur.o character_select.o highscore.o minimap.o save_system.o main_menu.o -o prog $(LIBS)
+prog: main.o source.o joueur.o character_select.o highscore.o minimap.o save_system.o main_menu.o puzzle_game/game.o
+	$(CC) main.o source.o joueur.o character_select.o highscore.o minimap.o save_system.o main_menu.o puzzle_game/game.o -o prog $(LIBS)
 
 main.o: main.c header.h highscore.h minimap/minimap.h save_system.h main_menu.h
 	$(CC) -c main.c $(CFLAGS)
@@ -29,13 +29,9 @@ save_system.o: save_system.c save_system.h header.h
 main_menu.o: main_menu.c main_menu.h header.h
 	$(CC) -c main_menu.c $(CFLAGS)
 
-puzzle_game/puzzle: puzzle_game/main.c puzzle_game/game.c puzzle_game/game.h puzzle_game/assets.h
-	$(MAKE) -C puzzle_game
-
-enigma/enigma: enigma/main.c enigma/game_logic.c enigma/game_draw.c enigma/game.h
-	$(MAKE) -C enigma
+puzzle_game/game.o: puzzle_game/game.c puzzle_game/game.h puzzle_game/assets.h
+	$(CC) -c puzzle_game/game.c -o puzzle_game/game.o $(CFLAGS)
 
 clean:
-	rm -f prog main.o source.o joueur.o character_select.o highscore.o minimap.o save_system.o main_menu.o
+	rm -f prog main.o source.o joueur.o character_select.o highscore.o minimap.o save_system.o main_menu.o puzzle_game/game.o
 	$(MAKE) -C puzzle_game clean
-	$(MAKE) -C enigma clean

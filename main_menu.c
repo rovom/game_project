@@ -9,14 +9,13 @@
 #define MAIN_MENU_START_HOVER "assets/main_menu/Start_hover.png"
 #define MAIN_MENU_SETTINGS_IMG "assets/main_menu/settings ID.png"
 #define MAIN_MENU_SETTINGS_HOVER "assets/main_menu/Settings_hover.png"
-#define MAIN_MENU_QUIZ /home/pj/Stellarwars/assets/main_menu/quiz.png
 #define MAIN_MENU_SCORE_IMG "assets/main_menu/score ids.png"
 #define MAIN_MENU_SCORE_HOVER "assets/main_menu/Score_hoverd.png"
 #define MAIN_MENU_BACKSTORY_IMG "assets/main_menu/backstory ID.png"
 #define MAIN_MENU_BACKSTORY_HOVER "assets/main_menu/Backstory_hoverd.png"
 #define MAIN_MENU_EXIT_IMG "assets/main_menu/exit ID.png"
-#define MAIN_MENU_QUIZ_IMG   "assets/main_menu/quiz.png"
-#define MAIN_MENU_QUIZ_HOVER "assets/main_menu/quiz-h.png"
+#define MAIN_MENU_GAME2_IMG "assets/main_menu/game2.png"
+#define MAIN_MENU_GAME2_HOVER "assets/main_menu/game2_h.png"
 #define MAIN_MENU_HOVER_SOUND "assets/main_menu/Hover.mp3"
 #define MAIN_MENU_DEBUG 0
 
@@ -240,6 +239,15 @@ static void main_menu_layout(MainMenu *menu, int windowW, int windowH)
         totalH += targetH[i];
     }
 
+    if (targetW[1] > 0 && menu->buttons[0].normal.visible.w > 0)
+    {
+        totalH -= targetH[0];
+        targetW[0] = targetW[1];
+        targetH[0] = menu->buttons[0].normal.visible.h * targetW[0] /
+                     menu->buttons[0].normal.visible.w;
+        totalH += targetH[0];
+    }
+
     totalH += gap * 3;
     if (totalH > availableH)
     {
@@ -271,7 +279,6 @@ static void main_menu_layout(MainMenu *menu, int windowW, int windowH)
         y += targetH[i] + gap;
     }
 
-    /* Exit button — bottom-right corner */
     main_menu_fit_dimension(menu->buttons[4].normal.visible.w,
                             menu->buttons[4].normal.visible.h,
                             windowW * 14 / 100,
@@ -281,15 +288,14 @@ static void main_menu_layout(MainMenu *menu, int windowW, int windowH)
     menu->buttons[4].visibleRect.x = windowW - menu->buttons[4].visibleRect.w - windowW * 6 / 100;
     menu->buttons[4].visibleRect.y = windowH - menu->buttons[4].visibleRect.h - windowH * 7 / 100;
 
-    /* Quiz button — bottom-left corner, mirroring Exit */
     main_menu_fit_dimension(menu->buttons[5].normal.visible.w,
                             menu->buttons[5].normal.visible.h,
-                            windowW * 14 / 100,
-                            windowH * 9 / 100,
+                            windowW * 18 / 100,
+                            windowH * 10 / 100,
                             &menu->buttons[5].visibleRect.w,
                             &menu->buttons[5].visibleRect.h);
-    menu->buttons[5].visibleRect.x = leftX;
-    menu->buttons[5].visibleRect.y = windowH - menu->buttons[5].visibleRect.h - windowH * 7 / 100;
+    menu->buttons[5].visibleRect.x = (windowW - menu->buttons[5].visibleRect.w) / 2;
+    menu->buttons[5].visibleRect.y = windowH - menu->buttons[5].visibleRect.h - windowH * 6 / 100;
 }
 
 static void main_menu_init(MainMenu *menu, SDL_Renderer *renderer)
@@ -302,7 +308,7 @@ static void main_menu_init(MainMenu *menu, SDL_Renderer *renderer)
     main_menu_init_button(&menu->buttons[2], renderer, MAIN_MENU_SCORE_IMG, MAIN_MENU_SCORE_HOVER);
     main_menu_init_button(&menu->buttons[3], renderer, MAIN_MENU_BACKSTORY_IMG, MAIN_MENU_BACKSTORY_HOVER);
     main_menu_init_button(&menu->buttons[4], renderer, MAIN_MENU_EXIT_IMG, MAIN_MENU_EXIT_IMG);
-    main_menu_init_button(&menu->buttons[5], renderer, MAIN_MENU_QUIZ_IMG, MAIN_MENU_QUIZ_HOVER);
+    main_menu_init_button(&menu->buttons[5], renderer, MAIN_MENU_GAME2_IMG, MAIN_MENU_GAME2_HOVER);
     main_menu_layout(menu, MAIN_MENU_W, MAIN_MENU_HEIGHT);
     menu->hoverSound = Mix_LoadWAV(MAIN_MENU_HOVER_SOUND);
     stellarMusicStartMenu();
@@ -323,16 +329,37 @@ static void main_menu_destroy(MainMenu *menu)
         Mix_FreeChunk(menu->hoverSound);
 }
 
-static void main_menu_update_hover(MainMenu *menu)
+static void main_menu_mouse_logical(SDL_Renderer *renderer, int *x, int *y)
+{
+    int wx;
+    int wy;
+    float lx;
+    float ly;
+
+    SDL_GetMouseState(&wx, &wy);
+    SDL_RenderWindowToLogical(renderer, wx, wy, &lx, &ly);
+    *x = (int)lx;
+    *y = (int)ly;
+}
+
+static void main_menu_event_logical(SDL_Renderer *renderer, const SDL_Event *event, int *x, int *y)
+{
+    float lx;
+    float ly;
+
+    SDL_RenderWindowToLogical(renderer, event->button.x, event->button.y, &lx, &ly);
+    *x = (int)lx;
+    *y = (int)ly;
+}
+
+static void main_menu_update_hover(MainMenu *menu, SDL_Renderer *renderer)
 {
     int x;
     int y;
     int prev;
     int i;
 
-    SDL_GetMouseState(&x, &y);
-    x = x * MAIN_MENU_W / SCREEN_W;
-    y = y * MAIN_MENU_HEIGHT / SCREEN_H;
+    main_menu_mouse_logical(renderer, &x, &y);
     for (i = 0; i < MAIN_MENU_BUTTONS; i++)
     {
         prev = menu->buttons[i].hovered;
@@ -410,8 +437,29 @@ static void main_menu_render(MainMenu *menu, SDL_Renderer *renderer)
         SDL_RenderDrawRect(renderer, &logoRect);
 #endif
     }
+}
 
-    SDL_RenderPresent(renderer);
+static void main_menu_fade(SDL_Renderer *renderer, MainMenu *menu, int fadeOut)
+{
+    const Uint32 duration = 420;
+    Uint32 start = SDL_GetTicks();
+    Uint32 elapsed = 0;
+    SDL_Rect full = {0, 0, MAIN_MENU_W, MAIN_MENU_HEIGHT};
+
+    while (elapsed < duration)
+    {
+        Uint8 alpha;
+        elapsed = SDL_GetTicks() - start;
+        if (elapsed > duration) elapsed = duration;
+        alpha = fadeOut ? (Uint8)(255u * elapsed / duration)
+                        : (Uint8)(255u - 255u * elapsed / duration);
+        main_menu_render(menu, renderer);
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, alpha);
+        SDL_RenderFillRect(renderer, &full);
+        SDL_RenderPresent(renderer);
+        SDL_Delay(16);
+    }
 }
 
 int run_main_menu(SDL_Renderer *renderer)
@@ -423,41 +471,51 @@ int run_main_menu(SDL_Renderer *renderer)
     int i;
 
     main_menu_init(&menu, renderer);
+    SDL_RenderSetLogicalSize(renderer, MAIN_MENU_W, MAIN_MENU_HEIGHT);
+    main_menu_fade(renderer, &menu, 0);
     while (running)
     {
         stellarMusicUpdateMenu();
-        main_menu_update_hover(&menu);
+        main_menu_update_hover(&menu, renderer);
         main_menu_render(&menu, renderer);
+        SDL_RenderPresent(renderer);
         while (SDL_PollEvent(&event))
         {
+            int mx;
+            int my;
             if (event.type == SDL_QUIT)
                 running = 0;
             if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE)
                 running = 0;
             if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT)
+            {
+                (void)event;
+                main_menu_mouse_logical(renderer, &mx, &my);
                 for (i = 0; i < MAIN_MENU_BUTTONS; i++)
-                    menu.buttons[i].down = menu.buttons[i].hovered;
+                    menu.buttons[i].down = main_menu_inside(mx, my, menu.buttons[i].visibleRect);
+            }
             if (event.type == SDL_MOUSEBUTTONUP && event.button.button == SDL_BUTTON_LEFT)
             {
+                main_menu_mouse_logical(renderer, &mx, &my);
                 for (i = 0; i < MAIN_MENU_BUTTONS; i++)
                 {
-                    if (menu.buttons[i].down && menu.buttons[i].hovered)
+                    if (menu.buttons[i].down &&
+                        main_menu_inside(mx, my, menu.buttons[i].visibleRect))
                     {
                         if (i == 0)
                         {
                             result = MAIN_MENU_START;
+                            main_menu_fade(renderer, &menu, 1);
+                            running = 0;
+                        }
+                        if (i == 5)
+                        {
+                            result = MAIN_MENU_QUIZ;
+                            main_menu_fade(renderer, &menu, 1);
                             running = 0;
                         }
                         if (i == 4)
                             running = 0;
-                        if (i == 5)
-                        {
-                            /* Launch enigma 1 (quiz) from the main menu */
-                            main_menu_destroy(&menu);
-                            SDL_RenderSetLogicalSize(renderer, 0, 0);
-                            system(ENIGMA_COMMAND);
-                            main_menu_init(&menu, renderer);
-                        }
                     }
                     menu.buttons[i].down = 0;
                 }
@@ -466,7 +524,7 @@ int run_main_menu(SDL_Renderer *renderer)
         SDL_Delay(16);
     }
     main_menu_destroy(&menu);
-    SDL_RenderSetLogicalSize(renderer, 0, 0);
+    SDL_RenderSetLogicalSize(renderer, SCREEN_W, SCREEN_H);
     return result;
 }
 
@@ -510,7 +568,7 @@ int prompt_game_mode(SDL_Renderer *renderer, TTF_Font *font)
     while (result == 0)
     {
         stellarMusicUpdateMenu();
-        SDL_GetMouseState(&x, &y);
+        main_menu_mouse_logical(renderer, &x, &y);
         oldSingle = singleHover;
         oldMulti = multiHover;
         singleHover = main_menu_inside(x, y, single);
@@ -552,9 +610,12 @@ int prompt_game_mode(SDL_Renderer *renderer, TTF_Font *font)
             }
             if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT)
             {
-                if (main_menu_inside(event.button.x, event.button.y, single))
+                int mx;
+                int my;
+                main_menu_event_logical(renderer, &event, &mx, &my);
+                if (main_menu_inside(mx, my, single))
                     result = GAME_MODE_SINGLE;
-                if (main_menu_inside(event.button.x, event.button.y, multi))
+                if (main_menu_inside(mx, my, multi))
                     result = GAME_MODE_MULTI;
             }
         }

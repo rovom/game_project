@@ -5,6 +5,7 @@
 
 #define MAIN_MENU_QUIT 0
 #define MAIN_MENU_START 1
+#define MAIN_MENU_QUIZ 2
 #define GAME_MODE_SINGLE 1
 #define GAME_MODE_MULTI 2
 

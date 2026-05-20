@@ -138,6 +138,42 @@ static Animation *getCurrentAnimation(Joueur *J)
     }
 }
 
+static void updateShotgunReload(Joueur *J, Uint32 now)
+{
+    if (J->shotgunShells == SHOTGUN_SHELL_FULL || J->shotgunReloadStartedAt == 0)
+        return;
+
+    if (now - J->shotgunReloadStartedAt >= SHOTGUN_RELOAD_TIME)
+    {
+        J->shotgunShells = SHOTGUN_SHELL_FULL;
+        J->shotgunReloadStartedAt = 0;
+    }
+}
+
+static void renderShotgunShellCounter(SDL_Renderer *renderer, Joueur *J)
+{
+    SDL_Rect shell;
+    int i;
+    int masks[SHOTGUN_SHELLS] = {SHOTGUN_SHELL_FIRST, SHOTGUN_SHELL_SECOND};
+    int totalW = SHOTGUN_SHELLS * 14 + (SHOTGUN_SHELLS - 1) * 4;
+
+    shell.w = 14;
+    shell.h = 5;
+    shell.y = J->drawRect.y - 12;
+    if (shell.y < 2)
+        shell.y = 2;
+
+    SDL_SetRenderDrawColor(renderer, 190, 62, 48, 255);
+    for (i = 0; i < SHOTGUN_SHELLS; i++)
+    {
+        if ((J->shotgunShells & masks[i]) == 0)
+            continue;
+
+        shell.x = J->drawRect.x + J->drawRect.w / 2 - totalW / 2 + i * 18;
+        SDL_RenderFillRect(renderer, &shell);
+    }
+}
+
 static void setPlayerState(Joueur *J, PlayerState state)
 {
     if (J->state != state)
@@ -252,6 +288,8 @@ int initialiserJoueurAvecAssets(Joueur *J, SDL_Renderer *renderer, int x, int y,
     J->jumpHeld = 0;
     J->velY = 0.0f;
     J->lastShotTime = 0;
+    J->shotgunShells = SHOTGUN_SHELL_FULL;
+    J->shotgunReloadStartedAt = 0;
     J->invulnerableUntil = 0;
     J->deathTime = 0;
 
@@ -313,6 +351,8 @@ void lancerSaut(Joueur *J)
 void updateJoueur(Joueur *J, Uint32 now)
 {
     Animation *anim;
+
+    updateShotgunReload(J, now);
 
     if (!J->alive)
         setPlayerState(J, STATE_DIE);
@@ -445,6 +485,7 @@ void renderJoueur(SDL_Renderer *renderer, Joueur *J)
 
     J->drawRect = getJoueurDrawRect(J);
     SDL_RenderCopy(renderer, anim->texture, &J->posSprite, &J->drawRect);
+    renderShotgunShellCounter(renderer, J);
 }
 
 void reinitialiserPositionJoueur(Joueur *J)
@@ -459,6 +500,8 @@ void reinitialiserPositionJoueur(Joueur *J)
     J->jumpsUsed = 0;
     J->jumpHeld = 0;
     J->velY = 0.0f;
+    J->shotgunShells = SHOTGUN_SHELL_FULL;
+    J->shotgunReloadStartedAt = 0;
     setPlayerState(J, STATE_IDLE);
 }
 
@@ -494,6 +537,7 @@ void appliquerDegatsJoueur(Joueur *J, int damage, Uint32 now)
         J->isJumping = 0;
         J->jumpsUsed = 0;
         J->velY = 0.0f;
+        J->shotgunReloadStartedAt = 0;
         J->deathTime = now;
         setPlayerState(J, STATE_DIE);
     }
@@ -523,9 +567,15 @@ void effacerBullets(Bullet bullets[], int size)
         bullets[i].active = 0;
 }
 
-void tirerBullet(Bullet bullets[], int size, Joueur *shooter, int owner, Uint32 now)
+void tirerBullet(Bullet bullets[], int size, Joueur *shooter, int owner,
+                 Uint32 now, int targetX, int targetY, int shellMask)
 {
     int i;
+    int startX;
+    int startY;
+
+    (void)targetX;
+    (void)targetY;
 
     if (!shooter->alive || !shooter->visible)
         return;
@@ -533,24 +583,36 @@ void tirerBullet(Bullet bullets[], int size, Joueur *shooter, int owner, Uint32 
     if (now - shooter->lastShotTime < FIRE_COOLDOWN)
         return;
 
+    updateShotgunReload(shooter, now);
+    if ((shooter->shotgunShells & shellMask) == 0)
+        return;
+
     shooter->lastShotTime = now;
+    shooter->shotgunShells &= ~shellMask;
+    if (shooter->shotgunShells == 0)
+        shooter->shotgunReloadStartedAt = now;
     setPlayerState(shooter, STATE_FIRE);
+
+    startX = shooter->posScreen.x + shooter->posScreen.w / 2;
+    startY = shooter->posScreen.y + shooter->posScreen.h / 2;
 
     for (i = 0; i < size; i++)
     {
         if (!bullets[i].active)
         {
-            bullets[i].active = 1;
+            bullets[i].active = SHOTGUN_RANGE / BULLET_SPEED;
+            if (bullets[i].active < 1)
+                bullets[i].active = 1;
             bullets[i].direction = shooter->facing;
             bullets[i].owner = owner;
             bullets[i].rect.w = BULLET_W;
             bullets[i].rect.h = BULLET_H;
-            bullets[i].rect.y = shooter->posScreen.y + shooter->posScreen.h / 2;
-
-            if (shooter->facing == FACE_RIGHT)
-                bullets[i].rect.x = shooter->posScreen.x + shooter->posScreen.w - 5;
-            else
-                bullets[i].rect.x = shooter->posScreen.x - BULLET_W + 5;
+            bullets[i].x = (float)(startX - BULLET_W / 2);
+            bullets[i].y = (float)(startY - BULLET_H / 2);
+            bullets[i].velX = (shooter->facing == FACE_RIGHT) ? BULLET_SPEED : -BULLET_SPEED;
+            bullets[i].velY = 0.0f;
+            bullets[i].rect.x = (int)bullets[i].x;
+            bullets[i].rect.y = (int)bullets[i].y;
 
             return;
         }
@@ -566,12 +628,16 @@ void updateBullets(Bullet bullets[], int size)
         if (!bullets[i].active)
             continue;
 
-        if (bullets[i].direction == FACE_RIGHT)
-            bullets[i].rect.x += BULLET_SPEED;
-        else
-            bullets[i].rect.x -= BULLET_SPEED;
+        bullets[i].x += bullets[i].velX;
+        bullets[i].y += bullets[i].velY;
+        bullets[i].rect.x = (int)bullets[i].x;
+        bullets[i].rect.y = (int)bullets[i].y;
 
-        if (bullets[i].rect.x > WORLD_W || bullets[i].rect.x + bullets[i].rect.w < 0)
+        bullets[i].active--;
+        if (bullets[i].rect.x > WORLD_W || bullets[i].rect.x + bullets[i].rect.w < 0 ||
+            bullets[i].rect.y > WORLD_H || bullets[i].rect.y + bullets[i].rect.h < 0)
+            bullets[i].active = 0;
+        if (bullets[i].active <= 0)
             bullets[i].active = 0;
     }
 }
@@ -595,7 +661,7 @@ void renderBullets(SDL_Renderer *renderer, Bullet bullets[], int size)
         flash.h = 10;
         flash.y -= 2;
 
-        if (bullets[i].direction == FACE_RIGHT)
+        if (bullets[i].velX >= 0.0f)
             flash.x = bullets[i].rect.x + bullets[i].rect.w;
         else
             flash.x = bullets[i].rect.x - 4;

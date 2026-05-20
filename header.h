@@ -26,7 +26,7 @@
 
 #define PLAYER_W 120
 #define PLAYER_H 120
-#define PLAYER_SPEED 4
+#define PLAYER_SPEED 6
 #define PLAYER_LIVES 3
 #define PLAYER_HEALTH_MAX 3
 #define PLAYER_DAMAGE_COOLDOWN 900
@@ -60,6 +60,18 @@
 #define NPC_SLASH_ROWS 2
 #define NPC_DIE_COLS 6
 #define NPC_DIE_ROWS 1
+#define RUSHER_RUN_COLS 9
+#define RUSHER_RUN_ROWS 2
+#define RUSHER_RUN_FRAMES 18
+#define RUSHER_ATTACK_COLS 9
+#define RUSHER_ATTACK_ROWS 2
+#define RUSHER_ATTACK_FRAMES 18
+#define RUSHER_FRAME_W 241
+#define RUSHER_FRAME_H 362
+#define RUSHER_DRAW_W 146
+#define RUSHER_DRAW_H 220
+#define RUSHER_BODY_W 58
+#define RUSHER_BODY_H 108
 
 #define FACE_RIGHT 0
 #define FACE_LEFT 1
@@ -67,8 +79,14 @@
 #define MAX_BULLETS 50
 #define BULLET_W 24
 #define BULLET_H 8
-#define BULLET_SPEED 14
+#define BULLET_SPEED 36
 #define FIRE_COOLDOWN 250
+#define SHOTGUN_SHELLS 2
+#define SHOTGUN_SHELL_FIRST 1
+#define SHOTGUN_SHELL_SECOND 2
+#define SHOTGUN_SHELL_FULL (SHOTGUN_SHELL_FIRST | SHOTGUN_SHELL_SECOND)
+#define SHOTGUN_RELOAD_TIME 1100
+#define SHOTGUN_RANGE 360
 
 #define ENEMY_HEALTH_MAX 3
 #define ENEMY_ATTACK_RANGE 45
@@ -77,13 +95,31 @@
 #define ENEMY_DAMAGE_SCORE 10
 #define ENEMY_HIT_SCORE 10
 #define ENEMY_KILL_SCORE 100
-#define ENEMY_DETECTION_RANGE 310
-#define ENEMY_CHASE_SPEED 2.4f
-#define ENEMY_PATROL_SPEED 1.0f
+#define ENEMY_DETECTION_RANGE 360
+#define ENEMY_CHASE_RANGE 360
+#define ENEMY_CHASE_SPEED 3.4f
+#define ENEMY_PATROL_SPEED 1.5f
 #define ENEMY_JUMP_FORCE -14.0f
 #define ENEMY_GRAVITY 0.7f
 #define ENEMY_RANDOM_JUMP_CHANCE 2
 #define ENEMY_JUMP_COOLDOWN 1300
+#define RUSHER_HEALTH_MAX 4
+#define RUSHER_PATROL_SPEED 1.8f
+#define RUSHER_RUSH_SPEED 7.8f
+#define RUSHER_DETECTION_RANGE 430
+#define RUSHER_GIVE_UP_RANGE 560
+#define RUSHER_ATTACK_RANGE 62
+#define RUSHER_PREPARE_TIME 340
+#define RUSHER_ATTACK_DURATION 780
+#define RUSHER_ATTACK_COOLDOWN 620
+#define RUSHER_RECOVERY_TIME 560
+#define RUSHER_DAMAGE 1
+#define RUSHER_KNOCKBACK_RESISTANCE 0.68f
+#define RUSHER_ATTACK_ACTIVE_START_FRAME 5
+#define RUSHER_ATTACK_ACTIVE_END_FRAME 12
+#define RUSHER_ATTACK_HITBOX_W 72
+#define RUSHER_ATTACK_HITBOX_H 48
+#define RUSHER_RUN_FRAME_DELAY 58
 #define MAX_SECONDARY_ENTITIES 5
 #define MIN_SECONDARY_ENTITIES 2
 #define GEM_SCORE_VALUE 50
@@ -95,7 +131,6 @@
 #define PUZZLE_CHALLENGE_ROUNDS 5
 #define PUZZLE_CHALLENGE_REQUIRED 3
 #define PUZZLE_COMMAND "cd puzzle_game && ./puzzle"
-#define ENIGMA_COMMAND "cd enigma && ./enigma"
 
 typedef enum
 {
@@ -115,6 +150,21 @@ typedef enum
     ENEMY_ATTACKING,
     ENEMY_REMOVED
 } EnemyState;
+
+typedef enum
+{
+    NPC_AI_IDLE,
+    NPC_AI_AWARE,
+    NPC_AI_CHASING,
+    NPC_AI_ATTACKING,
+    NPC_AI_RECOVERING
+} NPCAIState;
+
+typedef enum
+{
+    NPC_TYPE_BASIC,
+    NPC_TYPE_RUSHER
+} NPCType;
 
 
 typedef struct
@@ -136,6 +186,10 @@ typedef struct
     SDL_Rect rect; 
     int direction; 
     int owner; 
+    float x; 
+    float y; 
+    float velX; 
+    float velY; 
 } Bullet;
 
 typedef struct
@@ -200,6 +254,8 @@ typedef struct
     int moveLeft; 
     int moveRight; 
     Uint32 lastShotTime; 
+    int shotgunShells; 
+    Uint32 shotgunReloadStartedAt; 
     Uint32 invulnerableUntil; 
     Uint32 deathTime; 
 } Joueur;
@@ -225,6 +281,7 @@ typedef struct
     int health; 
     int maxHealth; 
     EnemyState state; 
+    NPCAIState aiState; 
     Uint32 lastFrameTime; 
     Uint32 frameDelay; 
     Uint32 attackStartedAt; 
@@ -232,6 +289,10 @@ typedef struct
     float velY; 
     int onGround; 
     Uint32 nextJumpAt; 
+    NPCType npcType; 
+    Uint32 aiStateStartedAt; 
+    Uint32 lastSawPlayerAt; 
+    int attackDamageApplied; 
 } NPC;
 
 typedef struct
@@ -269,7 +330,8 @@ void ajouterScoreJoueur(Joueur *J, int delta);
 
 void initBullets(Bullet bullets[], int size);
 void effacerBullets(Bullet bullets[], int size);
-void tirerBullet(Bullet bullets[], int size, Joueur *shooter, int owner, Uint32 now);
+void tirerBullet(Bullet bullets[], int size, Joueur *shooter, int owner,
+                 Uint32 now, int targetX, int targetY, int shellMask);
 void updateBullets(Bullet bullets[], int size);
 void renderBullets(SDL_Renderer *renderer, Bullet bullets[], int size);
 
@@ -277,7 +339,10 @@ void initNPC(NPC *npc, SDL_Renderer *renderer);
 void destroyNPC(NPC *npc);
 void removeNPCFromPlay(NPC *npc);
 void spawnNPCFromSide(NPC *npc, int side);
+void spawnNPCAt(NPC *npc, int x, int patrolReach, int direction);
+void spawnRusherAt(NPC *npc, int x, int patrolReach, int direction);
 void spawnNPCInWave(NPC *npc, int index, int total, int avoidX, int avoidW);
+void setNPCType(NPC *npc, NPCType type);
 int npcCanSeePlayer(NPC *npc, Joueur *player);
 void updateNPC(NPC *npc, Joueur *player, int swarmAlerted,
                int cameraX, int viewW,

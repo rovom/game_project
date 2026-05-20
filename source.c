@@ -7,6 +7,24 @@
 static Mix_Music *stellarMusic = NULL;
 static Uint32 stellarMusicSegmentStartedAt = 0;
 static int stellarMusicMode = 0;
+static int stellarMusicSeekSupported = 1;
+static SDL_Texture *sharedNPCWalkTexture = NULL;
+static SDL_Texture *sharedNPCSlashTexture = NULL;
+static SDL_Texture *sharedNPCDieTexture = NULL;
+static SDL_Texture *sharedRusherRunTexture = NULL;
+static SDL_Texture *sharedRusherAttackTexture = NULL;
+static int sharedNPCSrcW = 0;
+static int sharedNPCSrcH = 0;
+static int sharedNPCSlashFrameW = 0;
+static int sharedNPCSlashFrameH = 0;
+static int sharedNPCDieFrameW = 0;
+static int sharedNPCDieFrameH = 0;
+static int sharedNPCRefs = 0;
+
+static int npcIsRusher(NPC *npc)
+{
+    return npc->npcType == NPC_TYPE_RUSHER;
+}
 
 int collisionAABB(SDL_Rect a, SDL_Rect b)
 {
@@ -24,14 +42,19 @@ int collisionAABB(SDL_Rect a, SDL_Rect b)
 
 static void setNPCWalkFrame(NPC *npc)
 {
+    if (npcIsRusher(npc))
+    {
+        npc->srcRect.x = 0;
+        npc->srcRect.y = 0;
+        npc->srcRect.w = RUSHER_FRAME_W;
+        npc->srcRect.h = RUSHER_FRAME_H;
+        return;
+    }
+
     if (npc->walkTexture != NULL)
     {
-        int textureW;
-        int textureH;
-
-        SDL_QueryTexture(npc->walkTexture, NULL, NULL, &textureW, &textureH);
-        npc->srcRect.w = textureW / NPC_WALK_COLS;
-        npc->srcRect.h = textureH / NPC_WALK_ROWS;
+        npc->srcRect.w = sharedNPCSrcW;
+        npc->srcRect.h = sharedNPCSrcH;
     }
     else
     {
@@ -47,7 +70,7 @@ static SDL_Rect getNPCGroundedDrawRect(NPC *npc, int w, int h)
 {
     SDL_Rect drawRect;
 
-    drawRect.x = npc->dstRect.x;
+    drawRect.x = npc->dstRect.x + npc->dstRect.w / 2 - w / 2;
     drawRect.y = npc->dstRect.y + npc->dstRect.h - h + NPC_VISUAL_GROUND_OFFSET;
     drawRect.w = w;
     drawRect.h = h;
@@ -118,6 +141,226 @@ static void maybeJumpNPC(NPC *npc, Joueur *player, int swarmAlerted, Uint32 now)
     }
 }
 
+void setNPCType(NPC *npc, NPCType type)
+{
+    npc->npcType = type;
+
+    if (type == NPC_TYPE_RUSHER)
+    {
+        npc->w = RUSHER_BODY_W;
+        npc->h = RUSHER_BODY_H;
+        npc->walkTexture = sharedRusherRunTexture;
+        npc->slashTexture = sharedRusherAttackTexture;
+        npc->health = RUSHER_HEALTH_MAX;
+        npc->maxHealth = RUSHER_HEALTH_MAX;
+        npc->frameDelay = RUSHER_RUN_FRAME_DELAY;
+        npc->aiStateStartedAt = SDL_GetTicks();
+        npc->lastSawPlayerAt = 0;
+        npc->attackDamageApplied = 0;
+    }
+    else
+    {
+        npc->w = 128;
+        npc->h = 128;
+        npc->walkTexture = sharedNPCWalkTexture;
+        npc->slashTexture = sharedNPCSlashTexture;
+        npc->health = ENEMY_HEALTH_MAX;
+        npc->maxHealth = ENEMY_HEALTH_MAX;
+        npc->frameDelay = 170;
+        npc->aiStateStartedAt = SDL_GetTicks();
+        npc->lastSawPlayerAt = 0;
+        npc->attackDamageApplied = 0;
+    }
+
+    npc->y = (float)npcBaseGroundY(npc);
+    setNPCWalkFrame(npc);
+    npc->dstRect.x = (int)npc->x;
+    npc->dstRect.y = (int)npc->y;
+    npc->dstRect.w = npc->w;
+    npc->dstRect.h = npc->h;
+}
+
+static int rusherCanDetectPlayer(NPC *npc, Joueur *player, int inView)
+{
+    int npcCenter;
+    int playerCenter;
+    int distance;
+
+    if (!inView || !isNPCActive(npc) || player == NULL || !player->alive || !player->visible)
+        return 0;
+
+    npcCenter = npc->dstRect.x + npc->dstRect.w / 2;
+    playerCenter = player->posScreen.x + player->posScreen.w / 2;
+    distance = playerCenter - npcCenter;
+    if (distance < 0)
+        distance = -distance;
+
+    if (distance > RUSHER_DETECTION_RANGE)
+        return 0;
+
+    return player->posScreen.y + player->posScreen.h > npc->dstRect.y + 14 &&
+           player->posScreen.y < npc->dstRect.y + npc->dstRect.h;
+}
+
+static void setRusherAIState(NPC *npc, NPCAIState state, Uint32 now)
+{
+    if (npc->aiState == state)
+        return;
+
+    npc->aiState = state;
+    npc->aiStateStartedAt = now;
+    if (state == NPC_AI_ATTACKING)
+    {
+        npc->state = ENEMY_ATTACKING;
+        npc->attackStartedAt = now;
+        npc->attackDamageApplied = 0;
+        npc->action = 0;
+    }
+}
+
+static void updateRusherNPC(NPC *npc, Joueur *player, int cameraX, int viewW,
+                            SDL_Rect stablePlatforms[], int stableCount,
+                            SDL_Rect movingPlatforms[], int movingCount)
+{
+    Uint32 now = SDL_GetTicks();
+    int floorY;
+    int npcCenter;
+    int playerCenter;
+    int distance;
+    int directionToPlayer;
+    int inView = npcIsInsideView(npc, cameraX, viewW);
+    int canDetect = rusherCanDetectPlayer(npc, player, inView);
+    int frame;
+
+    npcCenter = (int)npc->x + npc->w / 2;
+    playerCenter = (player != NULL) ? player->posScreen.x + player->posScreen.w / 2 : npcCenter;
+    distance = playerCenter - npcCenter;
+    directionToPlayer = (distance >= 0) ? 0 : 1;
+    if (distance < 0)
+        distance = -distance;
+
+    if (canDetect)
+        npc->lastSawPlayerAt = now;
+
+    if (npc->state == ENEMY_ATTACKING)
+    {
+        int elapsed = (int)(now - npc->attackStartedAt);
+        frame = (elapsed * RUSHER_ATTACK_FRAMES) / RUSHER_ATTACK_DURATION;
+        if (frame >= RUSHER_ATTACK_FRAMES)
+            frame = RUSHER_ATTACK_FRAMES - 1;
+
+        npc->direction = directionToPlayer;
+        npc->srcRect.x = (frame % RUSHER_ATTACK_COLS) * RUSHER_FRAME_W;
+        npc->srcRect.y = (frame / RUSHER_ATTACK_COLS) * RUSHER_FRAME_H;
+        npc->srcRect.w = RUSHER_FRAME_W;
+        npc->srcRect.h = RUSHER_FRAME_H;
+        npc->action = frame;
+
+        if (now - npc->attackStartedAt >= RUSHER_ATTACK_DURATION)
+        {
+            npc->state = (npc->health < npc->maxHealth) ? ENEMY_INJURED : ENEMY_ALIVE;
+            setRusherAIState(npc, NPC_AI_RECOVERING, now);
+            setNPCWalkFrame(npc);
+        }
+    }
+    else
+    {
+        if (!inView)
+            setRusherAIState(npc, NPC_AI_IDLE, now);
+        else if (npc->aiState == NPC_AI_IDLE && canDetect)
+            setRusherAIState(npc, NPC_AI_AWARE, now);
+        else if (npc->aiState == NPC_AI_AWARE)
+        {
+            npc->direction = directionToPlayer;
+            if (now - npc->aiStateStartedAt >= RUSHER_PREPARE_TIME)
+                setRusherAIState(npc, NPC_AI_CHASING, now);
+        }
+        else if (npc->aiState == NPC_AI_CHASING)
+        {
+            npc->direction = directionToPlayer;
+            if (player != NULL &&
+                distance <= (npc->w + player->posScreen.w) / 2 + RUSHER_ATTACK_RANGE &&
+                now >= npc->nextAttackAt)
+            {
+                setRusherAIState(npc, NPC_AI_ATTACKING, now);
+                npc->nextAttackAt = now + RUSHER_ATTACK_COOLDOWN;
+            }
+            else if (!canDetect && now - npc->lastSawPlayerAt > 1300)
+                setRusherAIState(npc, NPC_AI_IDLE, now);
+        }
+        else if (npc->aiState == NPC_AI_RECOVERING)
+        {
+            npc->direction = directionToPlayer;
+            if (now - npc->aiStateStartedAt >= RUSHER_RECOVERY_TIME)
+                setRusherAIState(npc, canDetect && distance <= RUSHER_GIVE_UP_RANGE ? NPC_AI_CHASING : NPC_AI_IDLE, now);
+        }
+
+        if (npc->aiState == NPC_AI_CHASING)
+        {
+            npc->direction = directionToPlayer;
+            npc->x += (npc->direction == 0) ? RUSHER_RUSH_SPEED : -RUSHER_RUSH_SPEED;
+        }
+        else if (npc->aiState == NPC_AI_IDLE)
+        {
+            if ((int)npc->x > npc->posMax)
+                npc->direction = 1;
+            if ((int)npc->x < npc->posMin)
+                npc->direction = 0;
+            npc->x += (npc->direction == 0) ? RUSHER_PATROL_SPEED : -RUSHER_PATROL_SPEED;
+        }
+    }
+
+    if (npc->x < 0)
+        npc->x = 0;
+    if (npc->x + npc->w > WORLD_W)
+        npc->x = WORLD_W - npc->w;
+
+    maybeJumpNPC(npc, player, npc->aiState == NPC_AI_CHASING, now);
+    floorY = getNPCFloorY(npc, stablePlatforms, stableCount, movingPlatforms, movingCount);
+    npc->velY += ENEMY_GRAVITY;
+    npc->y += npc->velY;
+    if (npc->y >= floorY)
+    {
+        npc->y = (float)floorY;
+        npc->velY = 0.0f;
+        npc->onGround = 1;
+    }
+    else
+        npc->onGround = 0;
+
+    if (npc->state != ENEMY_ATTACKING && now - npc->lastFrameTime >= npc->frameDelay)
+    {
+        npc->lastFrameTime = now;
+        frame = npc->action + 1;
+        if (frame >= RUSHER_RUN_FRAMES)
+            frame = 0;
+        npc->action = frame;
+        npc->srcRect.x = (frame % RUSHER_RUN_COLS) * RUSHER_FRAME_W;
+        npc->srcRect.y = (frame / RUSHER_RUN_COLS) * RUSHER_FRAME_H;
+        npc->srcRect.w = RUSHER_FRAME_W;
+        npc->srcRect.h = RUSHER_FRAME_H;
+    }
+
+    npc->dstRect.x = (int)npc->x;
+    npc->dstRect.y = (int)npc->y;
+    npc->dstRect.w = npc->w;
+    npc->dstRect.h = npc->h;
+}
+
+void spawnRusherAt(NPC *npc, int x, int patrolReach, int direction)
+{
+    spawnNPCAt(npc, x, patrolReach, direction);
+    setNPCType(npc, NPC_TYPE_RUSHER);
+    npc->state = ENEMY_ALIVE;
+    npc->aiState = NPC_AI_IDLE;
+    npc->action = 0;
+    npc->attackStartedAt = 0;
+    npc->nextAttackAt = 0;
+    npc->aiStateStartedAt = SDL_GetTicks();
+    npc->lastSawPlayerAt = 0;
+    npc->attackDamageApplied = 0;
+}
+
 int initSDL(SDL_Window **window, SDL_Renderer **renderer)
 {
     int imgFlags = IMG_INIT_PNG;
@@ -157,7 +400,7 @@ int initSDL(SDL_Window **window, SDL_Renderer **renderer)
                                SDL_WINDOWPOS_CENTERED,
                                SCREEN_W,
                                SCREEN_H,
-                               SDL_WINDOW_SHOWN);
+                               SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
 
     if (*window == NULL)
     {
@@ -185,6 +428,9 @@ int initSDL(SDL_Window **window, SDL_Renderer **renderer)
         SDL_Quit();
         return 0;
     }
+
+    SDL_SetWindowMinimumSize(*window, SCREEN_W / 2, SCREEN_H / 2);
+    SDL_RenderSetLogicalSize(*renderer, SCREEN_W, SCREEN_H);
 
     return 1;
 }
@@ -222,8 +468,11 @@ static int stellarMusicEnsureLoaded(void)
 
 static void stellarMusicSeek(double seconds)
 {
+    if (!stellarMusicSeekSupported)
+        return;
+
     if (Mix_SetMusicPosition(seconds) != 0)
-        printf("[ERREUR] Mix_SetMusicPosition %.2f : %s\n", seconds, Mix_GetError());
+        stellarMusicSeekSupported = 0;
 }
 
 void stellarMusicStartMenu(void)
@@ -292,6 +541,7 @@ void stellarMusicStop(void)
 
     stellarMusicMode = 0;
     stellarMusicSegmentStartedAt = 0;
+    stellarMusicSeekSupported = 1;
 }
 
 void initNPC(NPC *npc, SDL_Renderer *renderer)
@@ -308,28 +558,59 @@ void initNPC(NPC *npc, SDL_Renderer *renderer)
     srcW = npc->w;
     srcH = npc->h;
 
-    surface = IMG_Load("walk.png");
-    if (surface != NULL)
+    if (sharedNPCRefs == 0)
     {
-        npc->walkTexture = SDL_CreateTextureFromSurface(renderer, surface);
-        srcW = surface->w / NPC_WALK_COLS;
-        srcH = surface->h / NPC_WALK_ROWS;
+        surface = IMG_Load("walk.png");
+        if (surface != NULL)
+        {
+            sharedNPCWalkTexture = SDL_CreateTextureFromSurface(renderer, surface);
+            sharedNPCSrcW = surface->w / NPC_WALK_COLS;
+            sharedNPCSrcH = surface->h / NPC_WALK_ROWS;
+            SDL_FreeSurface(surface);
+        }
+
+        surface = IMG_Load("slash.png");
+        if (surface != NULL)
+        {
+            sharedNPCSlashTexture = SDL_CreateTextureFromSurface(renderer, surface);
+            sharedNPCSlashFrameW = surface->w / NPC_SLASH_COLS;
+            sharedNPCSlashFrameH = surface->h / NPC_SLASH_ROWS;
+            SDL_FreeSurface(surface);
+        }
+
+        surface = IMG_Load("die.png");
+        if (surface != NULL)
+        {
+            sharedNPCDieTexture = SDL_CreateTextureFromSurface(renderer, surface);
+            sharedNPCDieFrameW = surface->w / NPC_DIE_COLS;
+            sharedNPCDieFrameH = surface->h / NPC_DIE_ROWS;
+            SDL_FreeSurface(surface);
+        }
+
+        surface = IMG_Load("assets/enemies/rusher_run.png");
+        if (surface != NULL)
+        {
+            sharedRusherRunTexture = SDL_CreateTextureFromSurface(renderer, surface);
+            SDL_FreeSurface(surface);
+        }
+
+        surface = IMG_Load("assets/enemies/rusher_attack.png");
+        if (surface != NULL)
+        {
+            sharedRusherAttackTexture = SDL_CreateTextureFromSurface(renderer, surface);
+            SDL_FreeSurface(surface);
+        }
+    }
+
+    sharedNPCRefs++;
+    npc->walkTexture = sharedNPCWalkTexture;
+    npc->slashTexture = sharedNPCSlashTexture;
+    npc->dieTexture = sharedNPCDieTexture;
+    if (npc->walkTexture != NULL)
+    {
+        srcW = sharedNPCSrcW;
+        srcH = sharedNPCSrcH;
         npc->useSprite = 1;
-        SDL_FreeSurface(surface);
-    }
-
-    surface = IMG_Load("slash.png");
-    if (surface != NULL)
-    {
-        npc->slashTexture = SDL_CreateTextureFromSurface(renderer, surface);
-        SDL_FreeSurface(surface);
-    }
-
-    surface = IMG_Load("die.png");
-    if (surface != NULL)
-    {
-        npc->dieTexture = SDL_CreateTextureFromSurface(renderer, surface);
-        SDL_FreeSurface(surface);
     }
 
     if (npc->groundY == 0)
@@ -350,6 +631,7 @@ void initNPC(NPC *npc, SDL_Renderer *renderer)
     npc->health = ENEMY_HEALTH_MAX;
     npc->maxHealth = ENEMY_HEALTH_MAX;
     npc->state = ENEMY_ALIVE;
+    npc->aiState = NPC_AI_IDLE;
     npc->lastFrameTime = 0;
     npc->frameDelay = 170;
     npc->attackStartedAt = 0;
@@ -357,27 +639,46 @@ void initNPC(NPC *npc, SDL_Renderer *renderer)
     npc->velY = 0.0f;
     npc->onGround = 1;
     npc->nextJumpAt = SDL_GetTicks() + (Uint32)(rand() % ENEMY_JUMP_COOLDOWN);
+    npc->npcType = NPC_TYPE_BASIC;
+    npc->aiStateStartedAt = SDL_GetTicks();
+    npc->lastSawPlayerAt = 0;
+    npc->attackDamageApplied = 0;
 }
 
 void destroyNPC(NPC *npc)
 {
-    if (npc->walkTexture != NULL)
-        SDL_DestroyTexture(npc->walkTexture);
-
-    if (npc->slashTexture != NULL)
-        SDL_DestroyTexture(npc->slashTexture);
-
-    if (npc->dieTexture != NULL)
-        SDL_DestroyTexture(npc->dieTexture);
-
     npc->walkTexture = NULL;
     npc->slashTexture = NULL;
     npc->dieTexture = NULL;
+
+    if (sharedNPCRefs > 0)
+        sharedNPCRefs--;
+
+    if (sharedNPCRefs == 0)
+    {
+        SDL_DestroyTexture(sharedNPCWalkTexture);
+        SDL_DestroyTexture(sharedNPCSlashTexture);
+        SDL_DestroyTexture(sharedNPCDieTexture);
+        SDL_DestroyTexture(sharedRusherRunTexture);
+        SDL_DestroyTexture(sharedRusherAttackTexture);
+        sharedNPCWalkTexture = NULL;
+        sharedNPCSlashTexture = NULL;
+        sharedNPCDieTexture = NULL;
+        sharedRusherRunTexture = NULL;
+        sharedRusherAttackTexture = NULL;
+        sharedNPCSrcW = 0;
+        sharedNPCSrcH = 0;
+        sharedNPCSlashFrameW = 0;
+        sharedNPCSlashFrameH = 0;
+        sharedNPCDieFrameW = 0;
+        sharedNPCDieFrameH = 0;
+    }
 }
 
 void removeNPCFromPlay(NPC *npc)
 {
     npc->state = ENEMY_REMOVED;
+    npc->aiState = NPC_AI_IDLE;
     npc->health = 0;
     npc->action = 0;
     npc->velY = 0.0f;
@@ -391,6 +692,8 @@ void removeNPCFromPlay(NPC *npc)
 void spawnNPCFromSide(NPC *npc, int side)
 {
     int edgePadding = 70 + rand() % 90;
+
+    setNPCType(npc, NPC_TYPE_BASIC);
 
     if (side < 0)
     {
@@ -417,12 +720,60 @@ void spawnNPCFromSide(NPC *npc, int side)
     npc->health = ENEMY_HEALTH_MAX;
     npc->maxHealth = ENEMY_HEALTH_MAX;
     npc->state = ENEMY_ALIVE;
+    npc->aiState = NPC_AI_IDLE;
     npc->lastFrameTime = 0;
     npc->attackStartedAt = 0;
     npc->nextAttackAt = 0;
     npc->velY = 0.0f;
     npc->onGround = 1;
     npc->nextJumpAt = SDL_GetTicks() + (Uint32)(rand() % ENEMY_JUMP_COOLDOWN);
+    setNPCWalkFrame(npc);
+
+    npc->dstRect.x = (int)npc->x;
+    npc->dstRect.y = (int)npc->y;
+    npc->dstRect.w = npc->w;
+    npc->dstRect.h = npc->h;
+    setNPCType(npc, NPC_TYPE_BASIC);
+}
+
+void spawnNPCAt(NPC *npc, int x, int patrolReach, int direction)
+{
+    setNPCType(npc, NPC_TYPE_BASIC);
+
+    if (x < 0)
+        x = 0;
+    if (x > WORLD_W - npc->w)
+        x = WORLD_W - npc->w;
+
+    npc->x = (float)x;
+    npc->direction = direction;
+    if (npc->direction != 0)
+        npc->direction = 1;
+
+    if ((int)npc->x >= SHIP_END_X)
+        npc->groundY = MARS_GROUND_Y;
+    else
+        npc->groundY = GROUND_Y;
+    npc->y = (float)npcBaseGroundY(npc);
+
+    npc->posMin = (int)npc->x - patrolReach;
+    npc->posMax = (int)npc->x + patrolReach;
+    if (npc->posMin < 0)
+        npc->posMin = 0;
+    if (npc->posMax > WORLD_W - npc->w)
+        npc->posMax = WORLD_W - npc->w;
+
+    npc->action = 0;
+    npc->health = ENEMY_HEALTH_MAX;
+    npc->maxHealth = ENEMY_HEALTH_MAX;
+    npc->state = ENEMY_ALIVE;
+    npc->aiState = NPC_AI_IDLE;
+    npc->lastFrameTime = 0;
+    npc->attackStartedAt = 0;
+    npc->nextAttackAt = 0;
+    npc->velY = 0.0f;
+    npc->onGround = 1;
+    npc->nextJumpAt = SDL_GetTicks();
     setNPCWalkFrame(npc);
 
     npc->dstRect.x = (int)npc->x;
@@ -445,6 +796,8 @@ void spawnNPCInWave(NPC *npc, int index, int total, int avoidX, int avoidW)
     int avoidMax;
     int leftSpace;
     int rightSpace;
+
+    setNPCType(npc, NPC_TYPE_BASIC);
 
     if (total <= 0)
     {
@@ -547,6 +900,7 @@ void spawnNPCInWave(NPC *npc, int index, int total, int avoidX, int avoidW)
     npc->health = ENEMY_HEALTH_MAX;
     npc->maxHealth = ENEMY_HEALTH_MAX;
     npc->state = ENEMY_ALIVE;
+    npc->aiState = NPC_AI_IDLE;
     npc->lastFrameTime = 0;
     npc->attackStartedAt = 0;
     npc->nextAttackAt = 0;
@@ -601,7 +955,11 @@ void updateNPC(NPC *npc, Joueur *player, int swarmAlerted,
     int floorY;
     int npcCenter;
     int playerCenter;
-    int canChase;
+    int distance;
+    int inView;
+    int canSeePlayer;
+    int playerReady;
+    int playerAligned;
 
     if (npc->state == ENEMY_REMOVED)
         return;
@@ -610,13 +968,6 @@ void updateNPC(NPC *npc, Joueur *player, int swarmAlerted,
     {
         if (npc->dieTexture != NULL)
         {
-            int dieW;
-            int dieH;
-            int dieFrameW;
-
-            SDL_QueryTexture(npc->dieTexture, NULL, NULL, &dieW, &dieH);
-            dieFrameW = dieW / NPC_DIE_COLS;
-
             if (now - npc->lastFrameTime >= npc->frameDelay)
             {
                 npc->lastFrameTime = now;
@@ -629,10 +980,10 @@ void updateNPC(NPC *npc, Joueur *player, int swarmAlerted,
                 }
             }
 
-            npc->srcRect.x = npc->action * dieFrameW;
+            npc->srcRect.x = npc->action * sharedNPCDieFrameW;
             npc->srcRect.y = 0;
-            npc->srcRect.w = dieFrameW;
-            npc->srcRect.h = dieH / NPC_DIE_ROWS;
+            npc->srcRect.w = sharedNPCDieFrameW;
+            npc->srcRect.h = sharedNPCDieFrameH;
         }
 
         npc->dstRect.x = (int)npc->x;
@@ -642,30 +993,32 @@ void updateNPC(NPC *npc, Joueur *player, int swarmAlerted,
         return;
     }
 
+    if (npcIsRusher(npc))
+    {
+        updateRusherNPC(npc, player, cameraX, viewW,
+                        stablePlatforms, stableCount,
+                        movingPlatforms, movingCount);
+        return;
+    }
+
     if (npc->state == ENEMY_ATTACKING)
     {
+        npc->aiState = NPC_AI_ATTACKING;
         if (npc->slashTexture != NULL)
         {
-            int slashW;
-            int slashH;
-            int slashFrameW;
-            int slashFrameH;
             int elapsed;
             int frame;
 
-            SDL_QueryTexture(npc->slashTexture, NULL, NULL, &slashW, &slashH);
-            slashFrameW = slashW / NPC_SLASH_COLS;
-            slashFrameH = slashH / NPC_SLASH_ROWS;
             elapsed = (int)(now - npc->attackStartedAt);
             frame = (elapsed * NPC_SLASH_COLS) / ENEMY_ATTACK_DURATION;
 
             if (frame >= NPC_SLASH_COLS)
                 frame = NPC_SLASH_COLS - 1;
 
-            npc->srcRect.x = frame * slashFrameW;
-            npc->srcRect.y = (npc->direction == 0) ? slashFrameH : 0;
-            npc->srcRect.w = slashFrameW;
-            npc->srcRect.h = slashFrameH;
+            npc->srcRect.x = frame * sharedNPCSlashFrameW;
+            npc->srcRect.y = (npc->direction == 0) ? sharedNPCSlashFrameH : 0;
+            npc->srcRect.w = sharedNPCSlashFrameW;
+            npc->srcRect.h = sharedNPCSlashFrameH;
         }
 
         if (now - npc->attackStartedAt >= ENEMY_ATTACK_DURATION)
@@ -674,6 +1027,7 @@ void updateNPC(NPC *npc, Joueur *player, int swarmAlerted,
                 npc->state = ENEMY_INJURED;
             else
                 npc->state = ENEMY_ALIVE;
+            npc->aiState = NPC_AI_AWARE;
             setNPCWalkFrame(npc);
         }
 
@@ -684,17 +1038,34 @@ void updateNPC(NPC *npc, Joueur *player, int swarmAlerted,
         return;
     }
 
-    canChase = swarmAlerted &&
-               npcIsInsideView(npc, cameraX, viewW) &&
-               player != NULL &&
-               player->alive &&
-               player->visible;
+    inView = npcIsInsideView(npc, cameraX, viewW);
+    playerReady = player != NULL && player->alive && player->visible;
+    npcCenter = (int)npc->x + npc->w / 2;
+    playerCenter = playerReady ? player->posScreen.x + player->posScreen.w / 2 : npcCenter;
+    distance = playerCenter - npcCenter;
+    if (distance < 0)
+        distance = -distance;
+    canSeePlayer = inView && playerReady && npcCanSeePlayer(npc, player);
+    playerAligned = playerReady &&
+                    player->posScreen.y + player->posScreen.h > (int)npc->y + 18 &&
+                    player->posScreen.y < (int)npc->y + npc->h - 18;
 
-    if (canChase)
+    if (!inView)
+        npc->aiState = NPC_AI_IDLE;
+    else if (playerAligned && distance <= (npc->w + player->posScreen.w) / 2 + ENEMY_ATTACK_RANGE)
     {
-        npcCenter = (int)npc->x + npc->w / 2;
-        playerCenter = player->posScreen.x + player->posScreen.w / 2;
+        npc->direction = (playerCenter >= npcCenter) ? 0 : 1;
+        npc->aiState = NPC_AI_ATTACKING;
+    }
+    else if (swarmAlerted && canSeePlayer && distance <= ENEMY_CHASE_RANGE)
+        npc->aiState = NPC_AI_CHASING;
+    else if (swarmAlerted && canSeePlayer)
+        npc->aiState = NPC_AI_AWARE;
+    else
+        npc->aiState = NPC_AI_AWARE;
 
+    if (npc->aiState == NPC_AI_CHASING)
+    {
         if (playerCenter >= npcCenter)
         {
             npc->direction = 0;
@@ -706,7 +1077,11 @@ void updateNPC(NPC *npc, Joueur *player, int swarmAlerted,
             npc->x -= ENEMY_CHASE_SPEED;
         }
     }
-    else
+    else if (npc->aiState == NPC_AI_AWARE && swarmAlerted && canSeePlayer)
+    {
+        npc->direction = (playerCenter >= npcCenter) ? 0 : 1;
+    }
+    else if (npc->aiState != NPC_AI_IDLE && npc->aiState != NPC_AI_ATTACKING)
     {
         if ((int)npc->x > npc->posMax)
             npc->direction = 1;
@@ -725,7 +1100,7 @@ void updateNPC(NPC *npc, Joueur *player, int swarmAlerted,
     if (npc->x + npc->w > WORLD_W)
         npc->x = WORLD_W - npc->w;
 
-    maybeJumpNPC(npc, player, canChase, now);
+    maybeJumpNPC(npc, player, npc->aiState == NPC_AI_CHASING, now);
 
     floorY = getNPCFloorY(npc, stablePlatforms, stableCount, movingPlatforms, movingCount);
     npc->velY += ENEMY_GRAVITY;
@@ -784,6 +1159,24 @@ void renderNPC(SDL_Renderer *renderer, NPC *npc)
         SDL_Rect dieDst = getNPCGroundedDrawRect(npc, npc->w, npc->h);
 
         SDL_RenderCopy(renderer, npc->dieTexture, &npc->srcRect, &dieDst);
+    }
+    else if (npcIsRusher(npc))
+    {
+        SDL_Rect rushDst = getNPCGroundedDrawRect(npc, RUSHER_DRAW_W, RUSHER_DRAW_H);
+        SDL_RendererFlip flip = SDL_FLIP_NONE;
+
+        if (npc->direction != 0)
+            flip = SDL_FLIP_HORIZONTAL;
+
+        if (npc->state == ENEMY_ATTACKING && npc->slashTexture != NULL)
+            SDL_RenderCopyEx(renderer, npc->slashTexture, &npc->srcRect, &rushDst, 0, NULL, flip);
+        else if (npc->walkTexture != NULL)
+            SDL_RenderCopyEx(renderer, npc->walkTexture, &npc->srcRect, &rushDst, 0, NULL, flip);
+        else
+        {
+            SDL_SetRenderDrawColor(renderer, 170, 55, 80, 255);
+            SDL_RenderFillRect(renderer, &npc->dstRect);
+        }
     }
     else if (npc->state == ENEMY_ATTACKING && npc->slashTexture != NULL)
     {

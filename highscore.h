@@ -1,3 +1,11 @@
+/**
+ * @file highscore.h
+ * @brief Highscore system for the game.
+ * @author Mariem Benmrad
+ * @version 0.1
+ * @date May 2026
+ */
+
 #ifndef HIGHSCORE_H_INCLUDED
 #define HIGHSCORE_H_INCLUDED
 

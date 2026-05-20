@@ -5,9 +5,10 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <stddef.h>
 
 #define SAVE_MAGIC "PFINAL_SAVE"
-#define SAVE_VERSION 3
+#define SAVE_VERSION 5
 #define MAX_SAVE_FILES 9
 #define SAVE_MENU_BG "assets/save_load/images/background.png"
 #define SAVE_MENU_YES "assets/save_load/images/button_yes.png"
@@ -79,6 +80,18 @@ typedef struct
     int movingMin[MOVING_PLATFORM_COUNT];
     int movingMax[MOVING_PLATFORM_COUNT];
     int multiplayerMode;
+    int gemCount;
+    SecondaryEntity gems[MAX_SECONDARY_ENTITIES];
+    int gemDamageBuffTimers[2];
+    int p1ShotgunShells;
+    int p2ShotgunShells;
+    Uint32 p1ShotgunReloadStartedAt;
+    Uint32 p2ShotgunReloadStartedAt;
+    Uint32 p1InvulnerableUntil;
+    Uint32 p2InvulnerableUntil;
+    Uint32 p1DeathTime;
+    Uint32 p2DeathTime;
+    int npcTypes[MAX_NPCS];
 } SaveData;
 
 typedef struct
@@ -145,6 +158,8 @@ static void copy_save_to_player(Joueur *dst, const SavedPlayer *src)
     dst->moveLeft = 0;
     dst->moveRight = 0;
     dst->lastShotTime = 0;
+    dst->shotgunShells = SHOTGUN_SHELLS;
+    dst->shotgunReloadStartedAt = 0;
     dst->invulnerableUntil = 0;
     dst->deathTime = 0;
 }
@@ -186,6 +201,7 @@ static void copy_save_to_npc(NPC *dst, const SavedNPC *src)
     dst->health = src->health;
     dst->maxHealth = src->maxHealth;
     dst->state = src->state;
+    dst->aiState = NPC_AI_IDLE;
     dst->lastFrameTime = 0;
     dst->frameDelay = src->frameDelay;
     dst->attackStartedAt = 0;
@@ -193,6 +209,10 @@ static void copy_save_to_npc(NPC *dst, const SavedNPC *src)
     dst->velY = 0.0f;
     dst->onGround = 1;
     dst->nextJumpAt = SDL_GetTicks() + (Uint32)(rand() % ENEMY_JUMP_COOLDOWN);
+    dst->npcType = NPC_TYPE_BASIC;
+    dst->aiStateStartedAt = SDL_GetTicks();
+    dst->lastSawPlayerAt = 0;
+    dst->attackDamageApplied = 0;
 }
 
 static void load_save_menu_visuals(SDL_Renderer *renderer, SaveMenuVisuals *visuals)
@@ -551,6 +571,8 @@ int save_game_state(const char *path,
                     Joueur *J1, Joueur *J2,
                     Bullet bullets[], int bulletCount,
                     NPC npcs[], int npcCount,
+                    SecondaryEntity gems[], int gemCount,
+                    int gemDamageBuffTimers[],
                     SDL_Rect stablePlatforms[], int stableCount,
                     SDL_Rect movingPlatforms[], int movingCount,
                     int movingDir[], int movingMin[], int movingMax[],
@@ -573,12 +595,29 @@ int save_game_state(const char *path,
     data.multiplayerMode = multiplayerMode;
     copy_player_to_save(&data.J1, J1);
     copy_player_to_save(&data.J2, J2);
+    data.gemCount = gemCount;
+    data.gemDamageBuffTimers[0] = gemDamageBuffTimers[0];
+    data.gemDamageBuffTimers[1] = gemDamageBuffTimers[1];
+    data.p1ShotgunShells = J1->shotgunShells;
+    data.p2ShotgunShells = J2->shotgunShells;
+    data.p1ShotgunReloadStartedAt = J1->shotgunReloadStartedAt;
+    data.p2ShotgunReloadStartedAt = J2->shotgunReloadStartedAt;
+    data.p1InvulnerableUntil = J1->invulnerableUntil;
+    data.p2InvulnerableUntil = J2->invulnerableUntil;
+    data.p1DeathTime = J1->deathTime;
+    data.p2DeathTime = J2->deathTime;
 
     for (i = 0; i < bulletCount && i < MAX_BULLETS; i++)
         data.bullets[i] = bullets[i];
 
     for (i = 0; i < npcCount && i < MAX_NPCS; i++)
+    {
         copy_npc_to_save(&data.npcs[i], &npcs[i]);
+        data.npcTypes[i] = npcs[i].npcType;
+    }
+
+    for (i = 0; i < gemCount && i < MAX_SECONDARY_ENTITIES; i++)
+        data.gems[i] = gems[i];
 
     for (i = 0; i < stableCount && i < STABLE_PLATFORM_COUNT; i++)
         data.stablePlatforms[i] = stablePlatforms[i];
@@ -609,6 +648,8 @@ int load_game_state(const char *path,
                     Joueur *J1, Joueur *J2,
                     Bullet bullets[], int bulletCount,
                     NPC npcs[], int npcCount,
+                    SecondaryEntity gems[], int maxGemCount, int *gemCount,
+                    int gemDamageBuffTimers[],
                     SDL_Rect stablePlatforms[], int stableCount,
                     SDL_Rect movingPlatforms[], int movingCount,
                     int movingDir[], int movingMin[], int movingMax[],
@@ -626,7 +667,7 @@ int load_game_state(const char *path,
         return 0;
 
     readBytes = fread(&data, 1, sizeof(data), file);
-    if (readBytes < sizeof(data) - sizeof(data.multiplayerMode))
+    if (readBytes < offsetof(SaveData, multiplayerMode))
     {
         fclose(file);
         return 0;
@@ -634,7 +675,7 @@ int load_game_state(const char *path,
     fclose(file);
 
     if (strcmp(data.magic, SAVE_MAGIC) != 0 ||
-        (data.version != SAVE_VERSION && data.version != 2))
+        (data.version != SAVE_VERSION && data.version != 4 && data.version != 3 && data.version != 2))
         return 0;
 
     copy_save_to_player(J1, &data.J1);
@@ -646,7 +687,76 @@ int load_game_state(const char *path,
         bullets[i].active = 0;
 
     for (i = 0; i < npcCount && i < data.npcCount && i < MAX_NPCS; i++)
+    {
+        NPCType savedType = NPC_TYPE_BASIC;
+        EnemyState savedState;
+        int savedHealth;
+        int savedMaxHealth;
+        int savedDirection;
+        int savedPosMin;
+        int savedPosMax;
+        int savedGroundY;
+        float savedX;
+
         copy_save_to_npc(&npcs[i], &data.npcs[i]);
+
+        if (data.version >= 5 &&
+            readBytes >= offsetof(SaveData, npcTypes) + sizeof(data.npcTypes[0]) * (i + 1))
+            savedType = data.npcTypes[i] == NPC_TYPE_RUSHER ? NPC_TYPE_RUSHER : NPC_TYPE_BASIC;
+
+        savedState = npcs[i].state;
+        savedHealth = npcs[i].health;
+        savedMaxHealth = npcs[i].maxHealth;
+        savedDirection = npcs[i].direction;
+        savedPosMin = npcs[i].posMin;
+        savedPosMax = npcs[i].posMax;
+        savedGroundY = npcs[i].groundY;
+        savedX = npcs[i].x;
+
+        setNPCType(&npcs[i], savedType);
+        npcs[i].x = savedX;
+        npcs[i].posMin = savedPosMin;
+        npcs[i].posMax = savedPosMax;
+        npcs[i].groundY = savedGroundY;
+        npcs[i].direction = savedDirection;
+        npcs[i].health = savedHealth;
+        npcs[i].maxHealth = savedMaxHealth;
+        npcs[i].state = savedState;
+        npcs[i].y = npcs[i].groundY + PLAYER_H - npcs[i].h;
+        npcs[i].dstRect.x = (int)npcs[i].x;
+        npcs[i].dstRect.y = (int)npcs[i].y;
+        npcs[i].dstRect.w = npcs[i].w;
+        npcs[i].dstRect.h = npcs[i].h;
+    }
+
+    if (data.version >= 4 && readBytes >= offsetof(SaveData, p1ShotgunShells))
+    {
+        int savedGemCount = data.gemCount;
+
+        if (savedGemCount < 0)
+            savedGemCount = 0;
+        if (savedGemCount > maxGemCount)
+            savedGemCount = maxGemCount;
+        if (savedGemCount > MAX_SECONDARY_ENTITIES)
+            savedGemCount = MAX_SECONDARY_ENTITIES;
+
+        for (i = 0; i < savedGemCount; i++)
+            gems[i] = data.gems[i];
+        for (; i < maxGemCount; i++)
+            gems[i].active = 0;
+
+        *gemCount = savedGemCount;
+        gemDamageBuffTimers[0] = data.gemDamageBuffTimers[0];
+        gemDamageBuffTimers[1] = data.gemDamageBuffTimers[1];
+        J1->shotgunShells = data.p1ShotgunShells;
+        J2->shotgunShells = data.p2ShotgunShells;
+        J1->shotgunReloadStartedAt = data.p1ShotgunReloadStartedAt;
+        J2->shotgunReloadStartedAt = data.p2ShotgunReloadStartedAt;
+        J1->invulnerableUntil = data.p1InvulnerableUntil;
+        J2->invulnerableUntil = data.p2InvulnerableUntil;
+        J1->deathTime = data.p1DeathTime;
+        J2->deathTime = data.p2DeathTime;
+    }
 
     for (i = 0; i < stableCount && i < data.stableCount && i < STABLE_PLATFORM_COUNT; i++)
         stablePlatforms[i] = data.stablePlatforms[i];
@@ -661,7 +771,7 @@ int load_game_state(const char *path,
 
     *joueurActif = data.joueurActif;
     *puzzleChallengeUsed = data.puzzleChallengeUsed;
-    if (data.version >= 3 && readBytes >= sizeof(data))
+    if (data.version >= 3 && readBytes >= offsetof(SaveData, gemCount))
         *multiplayerMode = (data.multiplayerMode != 0);
     else
         *multiplayerMode = 1;
